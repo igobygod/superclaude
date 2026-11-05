@@ -1,0 +1,4 @@
+#!/bin/bash
+# Usage: voicecall "reason" [--details "..."]   |   voicecall --setup-trunk
+set -a; . /etc/voice-caller/livekit.env; . /etc/voice-caller/secrets.env; set +a
+exec sudo -E -u voicecaller /srv/voice-caller/venv/bin/python /srv/voice-caller/call.py "$@"

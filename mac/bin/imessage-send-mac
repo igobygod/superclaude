@@ -1,0 +1,27 @@
+#!/bin/zsh
+# Called by the server over SSH. Args: base64(recipient) base64(message). Prints "sent".
+to=$(print -rn -- "$1" | base64 -D) || exit 2
+msg=$(print -rn -- "$2" | base64 -D) || exit 2
+[[ -n $to && -n $msg ]] || { echo "usage: imessage-send-mac B64_TO B64_MSG" >&2; exit 2; }
+# ledger so the iMessage listener ignores echoes of our own texts
+mkdir -p ~/.imessage-agent; printf '%s\t%s\t2\n' "$(date +%s)" "$(print -rn -- "$msg" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-40)" >> ~/.imessage-agent/sent.log
+caffeinate -i osascript - "$to" "$msg" <<'OSA'
+on run argv
+	set toH to item 1 of argv
+	set msg to item 2 of argv
+	tell application "Messages"
+		set svc to missing value
+		repeat with a in accounts
+			try
+				if (service type of a is iMessage) and (enabled of a is true) then
+					set svc to a
+					exit repeat
+				end if
+			end try
+		end repeat
+		if svc is missing value then error "no enabled iMessage account (Messages signed out?)" number 76
+		send msg to participant toH of svc
+	end tell
+	return "sent"
+end run
+OSA

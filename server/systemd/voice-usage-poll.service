@@ -1,0 +1,7 @@
+[Unit]
+Description=Poll Claude Max usage and send 80% warnings
+[Service]
+Type=oneshot
+UMask=0002
+EnvironmentFile=-/etc/voice-caller/agent.env
+ExecStart=/usr/local/lib/voice-dashboard/voice-usage poll

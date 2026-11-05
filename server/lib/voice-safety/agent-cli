@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""One-tap voice-agent commands (symlinked as agent-status, agent-stop, agent-resume, agent-restart, agent-journal, agent-usage, agent-logs).
+Short lines for a phone screen. Never prints secrets."""
+import sys,os,re,json,time,subprocess,glob
+if os.geteuid()!=0:
+    os.environ["AGENT_NAME"]=os.path.basename(sys.argv[0])
+    os.execvp("sudo",["sudo","-n","AGENT_NAME="+os.path.basename(sys.argv[0]),"/usr/bin/python3","/usr/local/lib/voice-safety/agent-cli"]+sys.argv[1:])
+NAME=os.environ.get("AGENT_NAME") or os.path.basename(sys.argv[0])
+from datetime import datetime
+from zoneinfo import ZoneInfo
+TZ=ZoneInfo(os.environ.get("AGENT_TZ","UTC")); STOP="/var/lib/voice-tasks/STOP"
+if os.geteuid()!=0: os.execvp("sudo",["sudo","-n",sys.executable,os.path.realpath(__file__)]+sys.argv[1:]) if False else None
+def sh(c,t=20):
+    try: r=subprocess.run(c,shell=True,capture_output=True,text=True,timeout=t); return (r.stdout+r.stderr).strip()
+    except Exception as e: return f"({e})"
+def sudo(c): return sh(c)
+def jl(p):
+    out=[]
+    try:
+        for l in open(p):
+            try: out.append(json.loads(l))
+            except Exception: pass
+    except Exception: pass
+    return out
+def live_call():
+    ev=jl("/var/lib/voicecaller/calls.jsonl")[-60:]
+    calls={}
+    for e in ev: calls.setdefault(e["call_id"],[]).append(e)
+    for cid,es in calls.items():
+        names=[e.get("event") for e in es]; last=max(e["time"] for e in es)
+        if ("answered" in names or "incoming" in names) and not {"ended","transcript"}&set(names) and time.time()-last<3600:
+            return cid,int((time.time()-last)/60)
+    return None
+def running_tasks():
+    try: return [f for f in os.listdir("/var/lib/voice-tasks/running")]
+    except Exception: return []
+def queued():
+    try: return len([f for f in os.listdir("/var/lib/voice-tasks/queue") if f.endswith(".json")])
+    except Exception: return 0
+def redact(s):
+    s=re.sub(r"(sk-[A-Za-z0-9_\-]{8,}|AIza[0-9A-Za-z_\-]{10,}|\b\d{6,}:[A-Za-z0-9_\-]{20,}|Bearer\s+\S+)","***",s)
+    s=re.sub(r"(?i)((?:token|key|pass(?:word)?|secret|authorization)\s*[=:]\s*)\S+",r"\1***",s)
+    return re.sub(r"/(?:call|jobs)/[A-Za-z0-9_\-]{12,}","/\\g<0>"[:0]+"/***",s)
+def status():
+    svc=["voice-caller","voice-watcher","voice-tasks","voice-notify","voice-dashboard","voice-memory-llm","voice-sip-relay","claude-helper"]
+    out=["== services =="]
+    for s in svc:
+        a=sh(f"systemctl is-active {s}"); out.append(f"{'✓' if a=='active' else '✗'} {s.replace('voice-','')} {'' if a=='active' else a}")
+    run=sh("docker ps --format '{{.Names}}'").split()
+    cs=[c for c in("voice-caller-redis-1","voice-caller-livekit-1","voice-caller-sip-1") if c in run]
+    out.append(f"{'✓' if len(cs)==3 else '✗'} containers {len(cs)}/3")
+    tm=sh("systemctl list-timers --no-pager --plain | grep -c voice"); out.append(f"timers: {tm} voice timers active")
+    out.append("== call =="); lc=live_call()
+    out.append(f"LIVE call ({lc[1]} min since last event)" if lc else "no live call")
+    ev=[e for e in jl("/var/lib/voicecaller/calls.jsonl") if e.get("event")=="dialing"]
+    if ev: out.append("last: "+datetime.fromtimestamp(ev[-1]["time"],TZ).strftime("%b %d %H:%M")+" "+ev[-1].get("reason","")[:40])
+    out.append("== tasks =="); out.append(f"running {len(running_tasks())}, queued {queued()}, STOP: {'ON ⛔' if os.path.exists(STOP) else 'off'}")
+    out.append("== usage =="); out.append(sh("voice-usage status",15)[:120])
+    out.append("== server =="); out.append(sh("df -h / | awk 'NR==2{print \"disk \"$5\" used\"}'; free -m | awk '/Mem/{print \"mem \"$7\"MB free\"}'").replace("\n",", "))
+    p=sh("systemctl is-failed 'voice-*' 2>/dev/null | grep -c failed")
+    out.append(f"failed units: {p}")
+    print("\n".join(out))
+def stop():
+    print(sudo(f"touch {STOP}") or "", end=""); print("⛔ STOP is ON: running tasks get cancelled and none start. Undo: agent-resume"); print(f"running now: {len(running_tasks())}")
+def resume():
+    print(sudo(f"rm -f {STOP}") or "", end=""); print("▶️ STOP removed: tasks run again.")
+def restart():
+    force="--force" in sys.argv; dry="--dry-run" in sys.argv
+    lc=live_call(); rt=running_tasks()
+    if lc and not force: print(f"REFUSED: a call is live ({lc[1]} min since last event). Wait for it to end."); sys.exit(1)
+    if rt and not force: print(f"REFUSED: {len(rt)} task(s) running (restart would kill them). Try later, or agent-stop first."); sys.exit(1)
+    if dry: print("dry-run: would restart voice-caller voice-watcher voice-tasks"); return
+    print(sudo("systemctl restart voice-caller voice-watcher voice-tasks") or "restarted"); time.sleep(4)
+    print(" ".join(f"{s.replace('voice-','')}:{sh('systemctl is-active '+s)}" for s in ["voice-caller","voice-watcher","voice-tasks"]))
+def journal():
+    if "--sys" in sys.argv:
+        print(redact(sh("journalctl --since today -p notice -u 'voice-*' --no-pager -o short -n 60 | cut -c1-140",30))); return
+    day=datetime.now(TZ).strftime("%b %-d"); txt=""
+    for p in sorted(glob.glob("/var/lib/voice-memory/journal/*.md"))[-2:]: txt+=open(p).read()
+    parts=re.split(r"\n(?=## )",txt); mine=[x for x in parts if x.startswith("## "+day+" ")]
+    if not mine: print(f"no journal entries yet today ({day}). Add --sys for the system journal."); return
+    for x in mine[-12:]:
+        h,_,b=x.partition("\n"); print(h[3:],"\n ",re.sub(r"\s+"," ",b).strip()[:220],"\n")
+def usage():
+    print(sh("voice-usage status",15)); n=0
+    s=datetime.now(TZ).replace(hour=0,minute=0,second=0).timestamp()
+    for p in glob.glob("/var/lib/voice-tasks/done/*.json"):
+        try:
+            d=json.load(open(p)); n+= d.get("finished",0)>=s
+        except Exception: pass
+    print(f"voice tasks finished today: {n}")
+    for l in sh("voice-usage status --json",15).splitlines()[:1]:
+        pass
+def logs():
+    h=next((a for a in sys.argv[1:] if a.isdigit()),"6")
+    u=" ".join(f"-u {x}" for x in "voice-caller voice-watcher voice-tasks voice-notify voice-dashboard voice-memory-llm voice-sip-relay claude-helper voice-install-spool".split())
+    o=sudo(f"journalctl --since '-{h}h' -p warning {u} --no-pager -o short -q | cut -c1-150")
+    seen=[];last=None
+    for l in o.splitlines():
+        k=re.sub(r"^\w+ \d+ [\d:]+ \S+ ","",l); k=re.sub(r"\[\d+\]","",k)
+        if "utempter" in l: continue
+        if k!=last: seen.append(redact(l)); last=k
+    print("\n".join(seen[-25:]) or f"no warnings/errors in the last {h}h ✓")
+{"status":status,"stop":stop,"resume":resume,"restart":restart,"journal":journal,"usage":usage,"logs":logs}[NAME.replace("agent-","")]()

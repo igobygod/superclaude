@@ -1,0 +1,14 @@
+[Unit]
+Description=voice-memory: nightly cleanup, journal extraction, mistakes and behaviour learning (Claude Haiku)
+OnFailure=voice-alert@%n.service
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks voicecaller
+UMask=0007
+ExecStart=/usr/local/bin/voice-memory nightly
+TimeoutStartSec=40min
+Nice=10

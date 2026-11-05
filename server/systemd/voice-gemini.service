@@ -1,0 +1,22 @@
+[Unit]
+Description=Gemini video helper (holds the API key, socket only)
+After=network-online.target
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=voicecaller
+Group=voicecaller
+SupplementaryGroups=voicetasks
+RuntimeDirectory=voice-gemini
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-creator/gemini_daemon.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/voice-creator
+ReadOnlyPaths=/etc/voice-caller
+OnFailure=voice-alert@%n.service
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Check new uploads every 10 min
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target

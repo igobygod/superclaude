@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""voice-video-edit: simple edits on the server with ffmpeg / auto-editor. Run as the helper. Outputs go to /var/lib/voice-creator/out.
+  trim IN --start 00:01:10 --end 00:02:00
+  silence IN [--margin 0.2s]            cut quiet parts (needs auto-editor)
+  shorts IN --start S --end E [--captions] [--fit crop|blur]   vertical 1080x1920 clip, captions via Gemini
+  preview FILE [--caption TEXT]         send the file to the owner on Telegram for approval (<=50 MB, auto-shrunk)
+Nothing is ever posted from here."""
+import sys, os, re, json, uuid, socket, argparse, subprocess, urllib.request, shutil, glob
+OUT = "/var/lib/voice-creator/out"; WORK = "/var/lib/voice-creator/work"; MEDIA = "/var/lib/voice-creator/media"
+AE = shutil.which("auto-editor") or next(iter(glob.glob("/opt/voice-tools/auto-editor/bin/auto-editor")), None)
+for d in (OUT, WORK): os.makedirs(d, exist_ok=True)
+def sh(c, **k):
+    r = subprocess.run(c, capture_output=True, text=True, **k)
+    if r.returncode: sys.exit("FAILED: " + " ".join(c[:2]) + ": " + (r.stderr or r.stdout)[-400:])
+    return r
+def name(inp, tag, ext="mp4"): return f"{OUT}/{os.path.splitext(os.path.basename(inp))[0]}-{tag}-{uuid.uuid4().hex[:4]}.{ext}"
+def need(p):
+    if not os.path.isfile(p): sys.exit("file not found: " + p)
+
+def gemini(path, prompt):
+    s = socket.socket(socket.AF_UNIX); s.connect("/run/voice-gemini/gemini.sock")
+    s.sendall((json.dumps({"file": path, "prompt": prompt, "model": "flash"}) + "\n").encode()); buf = b""
+    while not buf.endswith(b"\n"):
+        c = s.recv(65536)
+        if not c: break
+        buf += c
+    r = json.loads(buf)
+    if not r.get("ok"): sys.exit("Gemini: " + r.get("error", "?"))
+    return r["text"]
+
+def trim(a):
+    need(a.input); o = name(a.input, "trim")
+    sh(["ffmpeg", "-y", "-loglevel", "error", "-ss", a.start, "-to", a.end, "-i", a.input, "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-c:a", "aac", o]); print(o)
+
+def silence(a):
+    need(a.input)
+    if not AE: sys.exit("auto-editor is not installed yet (needs the owner's Telegram yes via voice-install-ask request pip auto-editor)")
+    o = name(a.input, "cut"); sh([AE, a.input, "--margin", a.margin, "-o", o, "--no-open"], timeout=3000); print(o)
+
+def shorts(a):
+    need(a.input); seg = f"{WORK}/{uuid.uuid4().hex[:6]}"
+    vf = "crop=ih*9/16:ih,scale=1080:1920" if a.fit == "crop" else "split[a][b];[a]scale=1080:1920,boxblur=30:5[bg];[b]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2"
+    cut = ["-ss", a.start, "-to", a.end, "-i", a.input]
+    srt = None
+    if a.captions:
+        mp3 = f"{MEDIA}/{uuid.uuid4().hex[:8]}.mp3"
+        sh(["ffmpeg", "-y", "-loglevel", "error"] + cut + ["-vn", "-ac", "1", "-b:a", "48k", mp3]); os.chmod(mp3, 0o664)
+        try: txt = gemini(mp3, "Transcribe the speech as an SRT subtitle file. Timestamps start at 00:00:00,000. Max 5 words per caption, each shown 0.8-2.5 seconds. Keep the spoken language. Output ONLY the SRT.")
+        finally: os.path.exists(mp3) and os.unlink(mp3)
+        txt = re.sub(r"^```\w*\n|```\s*$", "", txt.strip(), flags=re.M)
+        srt = seg + ".srt"; open(srt, "w").write(txt)
+    chain = ("[0:v]" + vf if "[a]" in vf else "[0:v]" + vf) if False else None
+    if a.fit == "crop": g = vf
+    else: g = vf.replace("split[a][b]", "[0:v]split[a][b]") + "[v]"
+    if srt:
+        sub = f"subtitles={srt}:force_style='FontName=DejaVu Sans,Bold=1,FontSize=14,Alignment=2,MarginV=260,Outline=3,PrimaryColour=&H00FFFFFF&'"
+        g = (g + "," + sub) if a.fit == "crop" else (g.replace("[v]", "[v0];[v0]") + sub + "[v]")
+    o = name(a.input, "short")
+    c = ["ffmpeg", "-y", "-loglevel", "error"] + cut
+    c += (["-vf", g] if a.fit == "crop" else ["-filter_complex", g, "-map", "[v]", "-map", "0:a?"])
+    c += ["-c:v", "libx264", "-crf", "21", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", o]
+    sh(c, timeout=3000); print(o)
+
+def preview(a):
+    need(a.input); f = a.input
+    if os.path.getsize(f) > 45e6:
+        f = f"{WORK}/prev-{uuid.uuid4().hex[:6]}.mp4"
+        sh(["ffmpeg", "-y", "-loglevel", "error", "-i", a.input, "-vf", "scale=-2:720", "-c:v", "libx264", "-crf", "30", "-preset", "veryfast", "-c:a", "aac", "-b:a", "96k", f])
+        if os.path.getsize(f) > 49e6: sys.exit("still over 50 MB; trim it or share a Drive link instead")
+    home = os.path.expanduser("~"); ch = f"{home}/.claude/channels/telegram"
+    tok = next(l.split("=", 1)[1].strip() for l in open(ch + "/.env") if l.startswith("TELEGRAM_BOT_TOKEN="))
+    chat = str(json.load(open(ch + "/access.json"))["allowFrom"][0]); b = uuid.uuid4().hex
+    def part(n, v): return f'--{b}\r\nContent-Disposition: form-data; name="{n}"\r\n\r\n{v}\r\n'.encode()
+    body = part("chat_id", chat) + part("caption", (a.caption or "Preview for your approval. Nothing is posted until you say yes.")[:900]) + part("supports_streaming", "true")
+    body += f'--{b}\r\nContent-Disposition: form-data; name="video"; filename="preview.mp4"\r\nContent-Type: video/mp4\r\n\r\n'.encode() + open(f, "rb").read() + f"\r\n--{b}--\r\n".encode()
+    r = urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendVideo", body, {"Content-Type": "multipart/form-data; boundary=" + b})
+    print("sent to owner on Telegram" if json.load(urllib.request.urlopen(r, timeout=300)).get("ok") else "send failed")
+
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter); sp = ap.add_subparsers(dest="cmd", required=True)
+for n, fn in (("trim", trim), ("silence", silence), ("shorts", shorts), ("preview", preview)):
+    p = sp.add_parser(n); p.add_argument("input"); p.set_defaults(fn=fn)
+    if n in ("trim", "shorts"): p.add_argument("--start", required=True); p.add_argument("--end", required=True)
+    if n == "silence": p.add_argument("--margin", default="0.2s")
+    if n == "shorts": p.add_argument("--captions", action="store_true"); p.add_argument("--fit", choices=["crop", "blur"], default="crop")
+    if n == "preview": p.add_argument("--caption")
+a = ap.parse_args(); a.fn(a)

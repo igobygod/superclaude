@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""voice-usage: Claude Max usage meter (5-hour + weekly) for the claude-helper account.
+
+  voice-usage status [--json] [--refresh]   one line "5h: 2%, week: 75%" (or full JSON)
+  voice-usage record ...                    log one finished run (tokens/cost/seconds)
+  voice-usage poll                          (root) fetch live numbers, log history, send Telegram alerts
+
+Source of truth: Anthropic's usage endpoint that Claude Code's own /usage uses
+(api.anthropic.com/api/oauth/usage, read with the helper's own login; undocumented, so it may change).
+Fallback: a tiny `claude -p` call whose stream-json carries a rate_limit_event (same numbers).
+Last resort: counts of recorded runs (clearly labelled as an estimate).
+"""
+import argparse, json, os, re, subprocess, sys, time, urllib.parse, urllib.request, urllib.error
+from pathlib import Path
+
+D = Path("/var/lib/voice-usage")
+LATEST, HIST, RUNS, ALERT = D / "latest.json", D / "history.jsonl", D / "runs.jsonl", D / "alert.json"
+CRED = Path("/home/claude-helper/.claude/.credentials.json")
+SECRETS = Path("/etc/voice-caller/secrets.env")
+CLAUDE = "/home/claude-helper/.local/bin/claude"
+WARN = 80.0
+STALE = 600  # seconds before status says "stale"
+LABEL = {"five_hour": "5-hour", "week": "weekly"}
+
+
+def now() -> float:
+    return time.time()
+
+
+def write(path: Path, data) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data))
+    os.chmod(tmp, 0o664)
+    tmp.replace(path)
+
+
+def load(path: Path, default=None):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default
+
+
+def iso_to_ts(s):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+# ---------- live sources ----------
+def fetch_oauth() -> dict:
+    tok = json.loads(CRED.read_text())["claudeAiOauth"]["accessToken"]
+    req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+        "Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1"})
+    o = json.load(urllib.request.urlopen(req, timeout=15))
+    out = {"source": "anthropic usage endpoint (exact, same data as Claude Code /usage)"}
+    for key, name in (("five_hour", "five_hour"), ("seven_day", "week")):
+        w = o.get(key) or {}
+        out[name] = {"pct": float(w.get("utilization") or 0), "resets_at": iso_to_ts(w.get("resets_at"))}
+    out["limits"] = [{"kind": l.get("kind"), "pct": l.get("percent"), "resets_at": iso_to_ts(l.get("resets_at")),
+                      "scope": l.get("scope")} for l in (o.get("limits") or [])]
+    return out
+
+
+def fetch_probe() -> dict:
+    """One tiny haiku call; its stream-json has a rate_limit_event with both windows (also refreshes the login token)."""
+    cwd = D / "probe"
+    cwd.mkdir(exist_ok=True)
+    if os.geteuid() == 0:
+        _pw = __import__("pwd").getpwnam("claude-helper"); os.chown(cwd, _pw.pw_uid, _pw.pw_gid)
+    env = ["env", "-u", "ANTHROPIC_API_KEY", "HOME=/home/claude-helper", "PATH=/home/claude-helper/.local/bin:/usr/bin:/bin"]
+    pre = ["runuser", "-u", "claude-helper", "--"] if os.geteuid() == 0 else []
+    p = subprocess.run(pre + env + [CLAUDE, "-p", "ok", "--model", "haiku", "--output-format", "stream-json", "--verbose",
+                                    "--setting-sources", "", "--tools", ""],
+                       cwd=cwd, capture_output=True, text=True, timeout=90)
+    for line in p.stdout.splitlines():
+        if '"rate_limit_event"' in line:
+            w = json.loads(line)["rate_limit_info"]["unifiedWindows"]
+            return {"source": "rate-limit event from a tiny claude call (exact)",
+                    "five_hour": {"pct": round(w["five_hour"]["utilization"] * 100, 1), "resets_at": w["five_hour"]["resetsAt"]},
+                    "week": {"pct": round(w["seven_day"]["utilization"] * 100, 1), "resets_at": w["seven_day"]["resetsAt"]},
+                    "limits": []}
+    raise RuntimeError("no rate_limit_event in probe output")
+
+
+def estimate() -> dict:
+    cut = now() - 5 * 3600
+    n = tok = 0
+    for l in (RUNS.read_text().splitlines() if RUNS.exists() else []):
+        try:
+            r = json.loads(l)
+        except Exception:
+            continue
+        if r.get("ts", 0) >= cut:
+            n += 1
+            tok += int(r.get("input_tokens") or 0) + int(r.get("output_tokens") or 0)
+    return {"source": "ESTIMATE only: exact usage unavailable; counting recorded runs", "five_hour": {"pct": None, "resets_at": None},
+            "week": {"pct": None, "resets_at": None}, "limits": [], "runs_5h": n, "tokens_5h": tok}
+
+
+# ---------- alerts ----------
+def telegram(text: str) -> bool:
+    env = {}
+    for l in SECRETS.read_text().splitlines():
+        if "=" in l:
+            k, v = l.split("=", 1)
+            env[k] = v.strip()
+    try:
+        data = urllib.parse.urlencode({"chat_id": env["TELEGRAM_CHAT_ID"], "text": text}).encode()
+        urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % env["TELEGRAM_BOT_TOKEN"], data, timeout=20)
+        return True
+    except Exception as e:
+        print("telegram failed:", type(e).__name__, file=sys.stderr)  # never print the URL (it holds the token)
+        return False
+
+
+def fmt_reset(ts) -> str:
+    if not ts:
+        return "unknown"
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.fromtimestamp(ts, ZoneInfo(os.environ.get("AGENT_TZ", "UTC"))).strftime("%a %b %d %H:%M")
+
+
+def check_alerts(cur: dict) -> None:
+    st = load(ALERT, {})
+    for name in ("five_hour", "week"):
+        w = cur.get(name) or {}
+        pct = w.get("pct")
+        if pct is None:
+            continue
+        s = st.setdefault(name, {"warned": False})
+        if pct >= WARN and not s["warned"]:
+            if telegram("Claude Max %s usage is at %d%% (limit shared by your Mac and the voice server). Resets %s (%s time). "
+                        "Voice tasks keep working until the limit is hit." % (LABEL[name], round(pct), fmt_reset(w.get("resets_at")), os.environ.get("AGENT_TZ", "UTC"))):
+                s["warned"] = True
+        elif pct < WARN and s["warned"]:
+            if telegram("Claude Max %s usage reset: now %d%%." % (LABEL[name], round(pct))):
+                s["warned"] = False
+    write(ALERT, st)
+
+
+def poll() -> dict:
+    prev = load(LATEST, {})
+    err = None
+    try:
+        cur = fetch_oauth()
+    except Exception as e:
+        err = "%s" % type(e).__name__ + (" %s" % getattr(e, "code", "") if hasattr(e, "code") else "")
+        cur = None
+        if now() - prev.get("last_probe", 0) > 1800:  # token expired/unusable: one tiny claude call refreshes it
+            prev["last_probe"] = now()
+            try:
+                cur = fetch_probe()
+            except Exception as e2:
+                err += "; probe failed: %s" % type(e2).__name__
+    if cur is None:
+        cur = dict(prev) if prev.get("five_hour", {}).get("pct") is not None else estimate()
+        cur["error"] = err
+        cur["ts"] = prev.get("ts", now()) if prev.get("five_hour", {}).get("pct") is not None else now()
+        cur["last_probe"] = prev.get("last_probe", 0)
+        write(LATEST, cur)
+        return cur
+    cur.update(ts=now(), last_probe=prev.get("last_probe", 0), error=None)
+    write(LATEST, cur)
+    with HIST.open("a") as f:
+        f.write(json.dumps({"ts": int(cur["ts"]), "five_hour": cur["five_hour"]["pct"], "week": cur["week"]["pct"]}) + "\n")
+    try:
+        os.chmod(HIST, 0o664)
+        if HIST.stat().st_size > 2_000_000:  # keep it small: drop the older half
+            lines = HIST.read_text().splitlines()
+            HIST.write_text("\n".join(lines[len(lines) // 2:]) + "\n")
+    except OSError:
+        pass
+    check_alerts(cur)
+    return cur
+
+
+# ---------- CLI ----------
+def status(args) -> int:
+    if args.refresh:
+        try:
+            poll()
+        except Exception:
+            pass
+    cur = load(LATEST) or estimate()
+    age = now() - cur.get("ts", 0)
+    f5, wk = cur["five_hour"]["pct"], cur["week"]["pct"]
+    exact = f5 is not None
+    if exact:
+        line = "5h: %d%%, week: %d%%" % (round(f5), round(wk))
+        if age > STALE:
+            line += " (stale %dm)" % (age // 60)
+    else:
+        line = "5h: unknown, week: unknown (estimate: %d runs / %d tokens in last 5h)" % (cur.get("runs_5h", 0), cur.get("tokens_5h", 0))
+    if args.json:
+        print(json.dumps({**cur, "line": line, "exact": exact, "age_seconds": round(age)}))
+    else:
+        print(line)
+    return 0
+
+
+def record(args) -> int:
+    r = {"ts": int(now()), "id": args.id, "model": args.model, "ok": args.ok, "seconds": args.seconds, "cost_usd": args.cost,
+         "input_tokens": args.input_tokens, "output_tokens": args.output_tokens}
+    if args.from_result:  # a `claude -p --output-format json` result on stdin
+        try:
+            o = json.loads(sys.stdin.read())
+            u = o.get("usage") or {}
+            r.update(cost_usd=o.get("total_cost_usd"), seconds=round((o.get("duration_ms") or 0) / 1000),
+                     input_tokens=(u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0),
+                     output_tokens=u.get("output_tokens"), ok=not o.get("is_error", False))
+        except Exception:
+            pass
+    with RUNS.open("a") as f:
+        f.write(json.dumps(r) + "\n")
+    try:
+        os.chmod(RUNS, 0o664)
+    except OSError:
+        pass
+    print("recorded")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="voice-usage")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--refresh", action="store_true")
+    r = sub.add_parser("record")
+    r.add_argument("--id", default="")
+    r.add_argument("--model", default="")
+    r.add_argument("--ok", type=lambda v: v not in ("0", "false", "False", ""), default=True)
+    r.add_argument("--seconds", type=float, default=None)
+    r.add_argument("--cost", type=float, default=None)
+    r.add_argument("--input-tokens", type=int, default=None)
+    r.add_argument("--output-tokens", type=int, default=None)
+    r.add_argument("--from-result", action="store_true", help="read a claude -p json result from stdin")
+    sub.add_parser("poll")
+    a = ap.parse_args()
+    if a.cmd == "poll":
+        c = poll()
+        print("5h: %s%%, week: %s%% (%s)" % (c["five_hour"]["pct"], c["week"]["pct"], c.get("error") or "ok"))
+        return 0
+    return {"status": status, "record": record}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,28 @@
+#!/bin/zsh
+# SSH entry point for the server's mac-run. Queues a job for the mac-run LaunchAgent (which runs in the
+# GUI login session, where Claude's keychain sign-in is readable) and waits for it. Same args as mac-run-exec.
+emulate -L zsh
+Q=$HOME/.mac-run; mkdir -p $Q/queue $Q/jobs; chmod 700 $Q
+# Subcommands that only read (no keychain needed): sessions [N], running
+case $1 in sessions|running) exec ~/bin/mac-claude "$@";; esac
+# Resume: arg 7 = session id. Refuse if its transcript changed in the last 10 min (owner may be using it).
+if [[ -n ${7:-} && $7 != - ]]; then
+  info=$(~/bin/mac-claude info "$7") || { echo "mac-run: no session $7"; echo "SPOKEN: I couldn't find that Claude session on the Mac."; exit 3; }
+  age=$(print -r -- "$info" | /usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin)["age_s"])')
+  if (( age < 600 )); then
+    echo "mac-run: session $7 was active $((age/60)) min ago; not resuming (owner may be using it). Retry later."
+    echo "SPOKEN: That session was used in the last 10 minutes, so I left it alone in case you're working in it."; exit 4
+  fi
+  cwd=$(print -r -- "$info" | /usr/bin/python3 -c 'import json,sys;print(json.load(sys.stdin)["cwd"] or "")')
+  [[ -n $cwd ]] && set -- "$(print -rn -- "$cwd" | base64)" "${@:2}"
+fi
+id=$(date +%Y%m%d-%H%M%S)-$$; J=$Q/jobs/$id; mkdir $J
+print -rl -- "$@" > $J/args
+: > $Q/queue/$id                      # launchd WatchPaths starts the worker
+caffeinate -i -s -w $$ </dev/null >/dev/null 2>&1 &!
+secs=${3:-600}; [[ $secs == <1-3600> ]] || secs=600
+for (( i=0; i < secs+60; i++ )); do [[ -f $J/rc ]] && break; sleep 1; done
+[[ -f $J/rc ]] || { echo "mac-run: worker did not finish (is the LaunchAgent loaded? launchctl print gui/$UID/com.superclaude.mac-run)" >&2; exit 70; }
+cat $J/out; cat $J/err >&2
+[[ ${6:-text} == text ]] && ! grep -q "^SPOKEN:" $J/out && { rc0=$(<$J/rc); (( rc0 == 0 )) && echo "SPOKEN: Done on the Mac." || echo "SPOKEN: The Mac job failed (code $rc0)."; }
+rc=$(<$J/rc); rm -rf $J; exit $rc

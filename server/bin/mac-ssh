@@ -1,0 +1,15 @@
+#!/bin/bash
+# mac-ssh CMD...  — run a command on the owner's Mac (MAC_LAN_IP via an Apple TV / Tailscale subnet router).
+# Waits up to ~90 s for a sleeping Mac to wake (Apple TV Bonjour Sleep Proxy wakes it on the SSH connect).
+[ -r /etc/voice-caller/agent.env ] && { set -a; . /etc/voice-caller/agent.env; set +a; }
+MAC_LAN_IP=${MAC_LAN_IP:-192.168.1.50}   # ASSUMPTION: example address; set MAC_LAN_IP and MAC_USER in agent.env
+MAC=${MAC_HOST:-${MAC_USER:-YOU}@$MAC_LAN_IP}
+KEY=${MAC_KEY:-/etc/mac-helpers/mac_key}
+OPTS=(-i "$KEY" -o SetEnv=LC_WAKE_LEASE_MIN=3 -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/mac-helpers/known_hosts)
+for try in 1 2 3 4 5 6; do
+  ssh "${OPTS[@]}" "$MAC" true 2>/dev/null && exec ssh "${OPTS[@]}" "$MAC" "$@"
+  ping -c2 -W2 "$MAC_LAN_IP" >/dev/null 2>&1
+  sleep 3
+done
+echo "mac-ssh: Mac not reachable after ~2 min (asleep without wake, off, or off Wi-Fi)" >&2
+exit 75

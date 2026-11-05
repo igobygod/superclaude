@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily refresh of the voice agent capabilities list
+[Timer]
+# Server local time zone (set with: timedatectl set-timezone <Zone>)
+OnCalendar=*-*-* 05:15
+OnBootSec=3min
+Persistent=true
+[Install]
+WantedBy=timers.target

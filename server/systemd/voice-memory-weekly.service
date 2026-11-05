@@ -1,0 +1,12 @@
+[Unit]
+Description=voice-memory: weekly review to the owner's Telegram
+OnFailure=voice-alert@%n.service
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks voicecaller
+UMask=0007
+ExecStart=/usr/local/bin/voice-memory weekly

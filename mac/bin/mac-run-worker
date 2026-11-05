@@ -1,0 +1,11 @@
+#!/bin/zsh
+# LaunchAgent com.superclaude.mac-run: runs queued mac-run jobs one at a time inside the login session.
+emulate -L zsh
+Q=$HOME/.mac-run
+while true; do
+  next=( $Q/queue/*(N.Om) ); (( ${#next} )) || exit 0
+  id=${next[1]:t}; rm -f $next[1]; J=$Q/jobs/$id; [[ -f $J/args ]] || continue
+  args=( "${(@f)$(<$J/args)}" )
+  $HOME/bin/mac-run-exec "${args[@]}" > $J/out.tmp 2> $J/err.tmp; rc=$?
+  mv $J/out.tmp $J/out; mv $J/err.tmp $J/err; print $rc > $J/rc.tmp; mv $J/rc.tmp $J/rc
+done

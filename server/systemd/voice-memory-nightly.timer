@@ -1,0 +1,9 @@
+[Unit]
+Description=voice-memory nightly at 03:05 local time
+
+[Timer]
+OnCalendar=*-*-* 03:05
+Persistent=true
+
+[Install]
+WantedBy=timers.target

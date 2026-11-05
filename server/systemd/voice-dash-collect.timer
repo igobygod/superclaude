@@ -1,0 +1,8 @@
+[Unit]
+Description=Calls snapshot every 30 s
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=5
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Claude Code Stop/SessionEnd hook: journal a one-line summary of this Mac session to the server's
+voice-memory (server forced command `voice-memory mac-ingest`). No Claude usage, never blocks:
+the hook returns at once and a background child sends; failures queue in ~/.claude/voice-journal/."""
+import json, os, re, subprocess, sys, time, fcntl
+from pathlib import Path
+
+DIR = Path.home() / ".claude/voice-journal"
+QUEUE, STATE = DIR / "queue.jsonl", DIR / "state.json"
+KEY = Path(os.environ.get("JOURNAL_SSH_KEY", str(Path.home() / ".ssh/voice-journal")))
+HOST = f'{os.environ.get("SERVER_USER", "claude-helper")}@{os.environ.get("SUPERCLAUDE_SERVER", "203.0.113.10")}'
+THROTTLE = 600  # Stop fires after every reply; send at most every 10 min per session (SessionEnd always)
+
+def text_of(msg):
+    c = (msg or {}).get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+def summarize(path):
+    first = last = ""
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("isSidechain") or d.get("isMeta"):
+                    continue
+                t = re.sub(r"<([A-Za-z_-]+)[^>]*>.*?</\1>", " ", text_of(d.get("message")), flags=re.S)
+                t = " ".join(t.split())
+                if not t or t.startswith(("<", "Caveat:", "[Request interrupted", "This session is being continued")):
+                    continue
+                if d.get("type") == "user" and not first:
+                    first = t
+                elif d.get("type") == "assistant" and (len(t) >= 40 or not last):
+                    last = t
+    except OSError:
+        return None
+    if not first:
+        return None
+    end = re.split(r"(?<=[.!?])\s", last, 1)[0] if last else "(no reply yet)"
+    return f"{first[:140]} -> {end[:220]}"
+
+def send():
+    DIR.mkdir(parents=True, exist_ok=True)
+    with open(DIR / ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        if not QUEUE.exists() or not QUEUE.read_text().strip():
+            return
+        data = QUEUE.read_text()
+        try:
+            r = subprocess.run(["ssh", "-i", str(KEY), "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                                "-o", "IdentitiesOnly=yes", HOST], input=data, capture_output=True, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.startswith("ok"):
+                QUEUE.write_text("")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+def main():
+    try:
+        ev = json.load(sys.stdin)
+    except ValueError:
+        return
+    sid, path = ev.get("session_id"), ev.get("transcript_path")
+    if not sid or not path or not KEY.exists():
+        return
+    DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        state = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        state = {}
+    final = ev.get("hook_event_name") == "SessionEnd"
+    if not final and time.time() - state.get(sid, 0) < THROTTLE:
+        return
+    summary = summarize(path)
+    if not summary:
+        return
+    proj = Path(ev.get("cwd") or "").name
+    if proj.startswith("scratch-"):
+        proj = "no folder"
+    with open(QUEUE, "a") as q:
+        q.write(json.dumps({"session": sid, "project": proj, "summary": summary, "ts": time.time()}) + "\n")
+    state[sid] = time.time()
+    state = dict(sorted(state.items(), key=lambda kv: kv[1])[-200:])
+    STATE.write_text(json.dumps(state))
+    if os.fork() == 0:          # background child: the hook itself returns immediately
+        os.setsid()
+        null = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(null, fd)   # release the hook's pipes so Claude Code is not kept waiting
+        send()
+        os._exit(0)
+
+if __name__ == "__main__":
+    main()

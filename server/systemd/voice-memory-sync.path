@@ -1,0 +1,13 @@
+[Unit]
+Description=voice-memory: watch profile.md, USER.md and the memory inbox
+
+[Path]
+PathChanged=/var/lib/voice-tasks/profile.md
+PathChanged=/home/claude-helper/assistant/notes/USER.md
+DirectoryNotEmpty=/var/lib/voice-tasks/memory-inbox
+Unit=voice-memory-sync.service
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=30
+
+[Install]
+WantedBy=multi-user.target

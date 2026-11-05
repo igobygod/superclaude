@@ -1,0 +1,31 @@
+#!/bin/zsh
+# Runs headless Claude Code on this Mac. Started by mac-run-worker (LaunchAgent, inside the login session so the
+# keychain sign-in works); jobs come from mac-run-mac over SSH.
+# Args: B64_DIR B64_PROMPT TIMEOUT_SECONDS MODE(safe|full) MODEL(or -) FORMAT(text|json) [RESUME_SESSION_ID or -]
+emulate -L zsh
+dir=; [[ $1 != - ]] && dir=$(print -rn -- "$1" | base64 -D); prompt=$(print -rn -- "$2" | base64 -D)
+secs=${3:-600}; mode=${4:-safe}; model=${5:--}; fmt=${6:-text}; resume=${7:--}
+[[ $secs == <1-3600> && -n $prompt ]] || { echo "mac-run-mac: bad args" >&2; exit 2; }
+export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+dir=${dir:-$HOME}; [[ $dir == "~"* ]] && dir="$HOME${dir#\~}"
+cd -- "$dir" 2>/dev/null || { echo "mac-run-mac: no such folder: $dir" >&2; exit 3; }
+args=(-p "$prompt" --output-format "$fmt" --append-system-prompt "You are running unattended, started by the owner's phone voice assistant; nobody can answer questions or approve prompts. If a step is on the owner's Ask-first list, needs a permission you don't have, or is risky or irreversible, do NOT do it: stop and report exactly what you need. Keep the reply short. End with one final line starting 'SPOKEN:' giving a one-sentence plain summary to read aloud.")
+[[ $resume != - ]] && { [[ $resume =~ '^[A-Za-z0-9-]+$' ]] || { echo "mac-run: bad session id" >&2; exit 2; }; args=(--resume "$resume" "${args[@]}"); }
+case $mode in
+  full) args+=(--dangerously-skip-permissions) ;;
+  *)    args+=(--permission-mode acceptEdits) ;;   # edits OK; other tools not pre-approved -> refused, not hung
+esac
+[[ $model != - ]] && args+=(--model "$model")
+logd="$HOME/Library/Logs/mac-run"; mkdir -p "$logd"; log="$logd/$(date +%Y%m%d-%H%M%S)-$$.log"
+print -r -- "resume=$resume dir=$dir mode=$mode timeout=$secs model=$model prompt=$prompt" > "$log"
+# Keep the Mac awake (also with the lid closed on AC) only while the run lasts.
+caffeinate -i -s -w $$ </dev/null >/dev/null 2>&1 &!
+claude "${args[@]}" </dev/null > >(tee -a "$log") 2> >(tee -a "$log" >&2) &
+cpid=$!
+( sleep $secs; kill -TERM $cpid 2>/dev/null && { sleep 5; kill -KILL $cpid 2>/dev/null; } ) </dev/null >/dev/null 2>&1 &!
+wpid=$!
+wait $cpid; rc=$?
+kill $wpid 2>/dev/null
+(( rc == 143 || rc == 137 )) && { echo "mac-run: timed out after ${secs}s" >&2; rc=124; }
+print -r -- "exit=$rc" >> "$log"
+exit $rc

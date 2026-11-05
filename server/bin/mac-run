@@ -1,0 +1,27 @@
+#!/bin/bash
+# mac-run [-d DIR] [-t SECONDS] [--full] [-m MODEL] [--json] [-r SESSION_ID] "PROMPT"
+# mac-run sessions [N]   recent Claude Code sessions on the Mac (id, title, folder, last activity)
+# mac-run running        Claude processes running on the Mac now
+# Output always ends with a "SPOKEN: ..." line (text mode) for the voice agent.
+# Wakes the owner's Mac (via Apple TV/Tailscale), runs headless Claude Code (claude -p) there, prints its answer.
+#   -d DIR    folder on the Mac to run in (default: home). "~/..." allowed.
+#   -t SECS   time limit, 1-3600 (default 600). Exit 124 on timeout.
+#   --full    skip all permission checks (only after the owner said yes out loud). Default: edits allowed, other tools refused.
+#   -m MODEL  e.g. sonnet, opus, haiku (default: Mac's default)
+#   --json    claude --output-format json (result, session_id, cost, ...)
+#   -r ID     resume that session headless in its own folder (refused, exit 4, if used in the last 10 min)
+# Exit: 0 ok, 4 session busy, 2 usage, 3 bad folder, 75 Mac unreachable, 124 timeout, other = claude's exit code.
+case "$1" in sessions|running)
+  n=${2:-8}; case "$n" in *[!0-9]*) n=8;; esac
+  exec timeout 200 /usr/local/bin/mac-ssh "~/bin/mac-run-mac $1 $n";; esac
+dir=""; resume=-; secs=600; mode=safe; model=-; fmt=text
+while [ $# -gt 1 ]; do case "$1" in
+  -d) dir=$2; shift 2;; -t) secs=$2; shift 2;; -m) model=$2; shift 2;; -r) resume=$2; shift 2;;
+  --full) mode=full; shift;; --json) fmt=json; shift;; --) shift; break;; *) break;; esac; done
+[ $# -eq 1 ] && [ -n "$1" ] || { sed -n "2,17p" "$0" >&2; exit 2; }
+case "$secs" in ""|*[!0-9]*) echo "bad -t" >&2; exit 2;; esac
+case "$model" in *[!A-Za-z0-9._-]*) echo "bad -m" >&2; exit 2;; esac
+case "$resume" in *[!A-Za-z0-9-]*) echo "bad -r" >&2; exit 2;; esac
+b() { printf %s "$1" | base64 -w0; }
+db=-; [ -n "$dir" ] && db=$(b "$dir")
+exec timeout $((secs+180)) /usr/local/bin/mac-ssh "~/bin/mac-run-mac $db $(b "$1") $secs $mode $model $fmt $resume"

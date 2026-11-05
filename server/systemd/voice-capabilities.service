@@ -1,0 +1,12 @@
+[Unit]
+Description=Voice agent: list what Claude can really use (connectors, skills, Mac)
+OnFailure=voice-alert@%n.service
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-tasks/capabilities.py
+TimeoutStartSec=300

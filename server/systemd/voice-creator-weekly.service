@@ -1,0 +1,11 @@
+[Unit]
+Description=Voice creator weekly
+OnFailure=voice-alert@%n.service
+[Service]
+Type=oneshot
+User=claude-helper
+Group=voicetasks
+UMask=0002
+EnvironmentFile=-/etc/voice-caller/agent.env
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-creator/creator.py weekly
+NoNewPrivileges=yes

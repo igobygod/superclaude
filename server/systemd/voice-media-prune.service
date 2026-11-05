@@ -1,0 +1,9 @@
+[Unit]
+Description=Prune the voice media inbox (7 days)
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/local/bin/voice-media prune

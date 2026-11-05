@@ -1,0 +1,6 @@
+[Unit]
+Description=Daily voice agent summary to Telegram
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/voice-caller/agent.env
+ExecStart=/usr/local/lib/voice-safety/voice-summary.py

@@ -1,0 +1,9 @@
+[Unit]
+Description=voice-memory weekly review, Sunday 18:30 local time
+
+[Timer]
+OnCalendar=Sun *-*-* 18:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

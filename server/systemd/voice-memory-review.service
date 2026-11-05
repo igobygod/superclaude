@@ -1,0 +1,14 @@
+[Unit]
+Description=voice-memory: post-call review of the voice line (Claude Sonnet) -> voice-lessons.md
+OnFailure=voice-alert@%n.service
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks voicecaller systemd-journal macaccess
+UMask=0007
+ExecStart=/usr/local/bin/voice-memory review-pending
+TimeoutStartSec=20min
+Nice=5

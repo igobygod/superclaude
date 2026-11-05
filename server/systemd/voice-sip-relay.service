@@ -1,0 +1,26 @@
+[Unit]
+Description=SIP registration relay: Linphone account -> livekit-sip (inbound calls)
+After=network-online.target docker.service
+Wants=network-online.target
+OnFailure=voice-alert@%N.service
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=simple
+User=kamailio
+Group=kamailio
+ExecStartPre=+/usr/bin/python3 /usr/local/lib/voice-sip-relay/gen.py
+ExecStartPre=/usr/sbin/kamailio -c -f /usr/local/lib/voice-sip-relay/relay.cfg
+ExecStart=/usr/sbin/kamailio -DD -E -f /usr/local/lib/voice-sip-relay/relay.cfg -m 64 -M 8
+Restart=always
+RestartSec=10
+RuntimeDirectory=voice-sip-relay
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=no
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

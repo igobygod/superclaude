@@ -1,0 +1,18 @@
+[Unit]
+Description=voice-notify daemon (texts, open questions, iMessage chat with the helper)
+After=network-online.target
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks macaccess
+WorkingDirectory=/home/claude-helper/assistant
+UMask=0007
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-notify/voice-notify-daemon.py
+Restart=always
+RestartSec=15
+MemoryMax=2G
+Nice=10
+NoNewPrivileges=yes
+[Install]
+WantedBy=multi-user.target

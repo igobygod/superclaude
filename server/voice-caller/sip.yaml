@@ -1,0 +1,12 @@
+# Replace the two LIVEKIT_*_PLACEHOLDER values with your own LiveKit key/secret (same pair in livekit.yaml, sip.yaml
+# and /etc/voice-caller/livekit.env). Generate with: docker run --rm livekit/livekit-server generate-keys
+api_key: LIVEKIT_API_KEY_PLACEHOLDER
+api_secret: LIVEKIT_API_SECRET_PLACEHOLDER
+ws_url: ws://127.0.0.1:7880
+redis:
+  address: 127.0.0.1:6379
+sip_port: 5060
+rtp_port: 10000-10100
+use_external_ip: true
+logging:
+  level: info

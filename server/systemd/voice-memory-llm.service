@@ -1,0 +1,19 @@
+[Unit]
+Description=voice-memory: Claude Haiku helper socket (Max plan) for recall/brief from other users
+After=network-online.target
+OnFailure=voice-alert@%n.service
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/local/bin/voice-memory llm-serve
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Gemini text brain proxy (holds the API key, socket only)
+After=network-online.target
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=voicecaller
+Group=voicecaller
+SupplementaryGroups=voicetasks
+RuntimeDirectory=voice-gemini-chat
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-notify/gemini_chat_daemon.py
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/voice-gemini-chat
+ReadOnlyPaths=/etc/voice-caller
+OnFailure=voice-alert@%n.service
+[Install]
+WantedBy=multi-user.target

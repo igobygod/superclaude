@@ -1,0 +1,16 @@
+[Unit]
+Description=Ask Claude shortcut endpoint
+After=network.target
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-notify/ask-server.py
+Restart=always
+RestartSec=10
+MemoryMax=512M
+NoNewPrivileges=yes
+[Install]
+WantedBy=multi-user.target

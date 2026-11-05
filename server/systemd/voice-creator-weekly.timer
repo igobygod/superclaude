@@ -1,0 +1,7 @@
+[Unit]
+Description=Weekly channel report, Sunday 18:00 (server local time)
+[Timer]
+OnCalendar=Sun *-*-* 18:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target

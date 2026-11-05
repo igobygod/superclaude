@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""voice-install: approved package installer (root). Only apt / pip(venv) / npm(global) PACKAGE installs.
+Every install needs an approval code that this script texts ONLY to the owner on Telegram; the requester never sees it.
+  request apt|pip|npm NAME...      -> creates request, texts owner "yes CODE"
+  run ID CODE [--dry-run]          -> verifies code, installs (dry-run does not use up the approval)
+  spool                            -> handles files from /var/lib/voice-install/inbox (used by voice-install-spool.path)
+No secrets are handled or printed. Log: /var/log/voice-install.log"""
+import sys,os,re,json,time,hmac,hashlib,secrets,subprocess,shutil,tempfile,glob,urllib.request,urllib.parse
+ROOT="/var/lib/voice-install"; REQ=ROOT+"/requests"; IN=ROOT+"/inbox"; OUT=ROOT+"/outbox"; LOG="/var/log/voice-install.log"
+TOOLS="/opt/voice-tools"; TTL=1800; MAXTRY=5
+APT_RE=re.compile(r"^(?:[a-z0-9]|[a-z0-9][a-z0-9.+\-]*[a-z0-9.])$")
+PIP_RE=re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,60}$")
+NPM_RE=re.compile(r"^(?:@[a-z0-9][a-z0-9._\-]*/)?[a-z0-9][a-z0-9._\-]{0,60}$")
+class Refuse(Exception): pass
+def log(**k):
+    k["ts"]=int(time.time())
+    try:
+        fd=os.open(LOG,os.O_WRONLY|os.O_APPEND|os.O_CREAT,0o640); os.write(fd,(json.dumps(k)+"\n").encode()); os.close(fd)
+    except Exception: pass
+def env():
+    e={}
+    for l in open("/etc/voice-caller/secrets.env"):
+        if "=" in l: a,b=l.rstrip("\n").split("=",1); e[a]=b.strip("'\"")
+    return e
+def tg(text):
+    try:
+        e=env(); d=urllib.parse.urlencode({"chat_id":e["TELEGRAM_CHAT_ID"],"text":text}).encode()
+        urllib.request.urlopen(f"https://api.telegram.org/bot{e['TELEGRAM_BOT_TOKEN']}/sendMessage",d,timeout=20); return True
+    except Exception: return False
+def validate(mgr,pkgs):
+    if mgr not in("apt","pip","npm"): raise Refuse("only apt, pip or npm package installs are allowed")
+    if not 1<=len(pkgs)<=8: raise Refuse("give 1 to 8 package names")
+    rx={"apt":APT_RE,"pip":PIP_RE,"npm":NPM_RE}[mgr]
+    for p in pkgs:
+        if not rx.fullmatch(p): raise Refuse(f"refused name '{p[:40]}': plain package names only (no URLs, paths, versions, flags)")
+    if mgr=="apt":
+        for p in pkgs:
+            r=subprocess.run(["apt-cache","policy","--",p],capture_output=True,text=True)
+            if "Candidate:" not in r.stdout or "Candidate: (none)" in r.stdout: raise Refuse(f"apt has no package '{p}'")
+    if mgr=="npm" and not shutil.which("npm"): raise Refuse("npm is not installed on this server (node not added)")
+    if mgr=="pip" and not shutil.which("python3"): raise Refuse("python3 missing")
+def load(i):
+    if not re.fullmatch(r"i[0-9a-f]{6}",i or ""): raise Refuse("bad request id")
+    p=f"{REQ}/{i}.json"
+    if not os.path.exists(p): raise Refuse("unknown request id")
+    return p,json.load(open(p))
+def save(p,d):
+    t=p+".tmp"; json.dump(d,open(t,"w")); os.chmod(t,0o600); os.replace(t,p)
+def cmd_request(mgr,pkgs):
+    validate(mgr,pkgs)
+    os.makedirs(REQ,exist_ok=True)
+    now=time.time(); pend=0; today=0
+    for f in glob.glob(REQ+"/*.json"):
+        try: d=json.load(open(f))
+        except Exception: continue
+        if now-d["created"]<86400: today+=1
+        if not d["used"] and d["expires"]>now: pend+=1
+    if pend>=3: raise Refuse("3 requests already waiting for the owner; wait or let them expire")
+    if today>=10: raise Refuse("daily limit of 10 install requests reached")
+    i="i"+secrets.token_hex(3); code="%06d"%secrets.randbelow(10**6); salt=secrets.token_hex(8)
+    d={"id":i,"mgr":mgr,"pkgs":pkgs,"salt":salt,"h":hashlib.sha256((salt+code).encode()).hexdigest(),"created":now,"expires":now+TTL,"tries":0,"used":False}
+    save(f"{REQ}/{i}.json",d)
+    ok=tg(f"🔧 Install request {i}\nTool: {mgr}\nPackages: {', '.join(pkgs)}\n\nTo approve, reply: yes {code}\nTo refuse, just ignore this (expires in 30 min). Nothing is installed until you reply.")
+    log(event="request",id=i,mgr=mgr,pkgs=pkgs,texted=ok)
+    if not ok: raise Refuse("could not text the owner, request cancelled")
+    return f"Request {i} created: {mgr} {' '.join(pkgs)}. The owner was texted the approval code. Wait for their reply 'yes <code>', then run: voice-install-ask run {i} <code>"
+def run(c,timeout=1200,cwd=None):
+    e=dict(os.environ,DEBIAN_FRONTEND="noninteractive",NEEDRESTART_MODE="a",PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+    r=subprocess.run(c,capture_output=True,text=True,timeout=timeout,env=e,cwd=cwd)
+    return r.returncode,(r.stdout+r.stderr)
+def do_install(d,dry):
+    mgr,pk=d["mgr"],d["pkgs"]
+    if mgr=="apt":
+        c=["apt-get","install","-y","--no-install-recommends","-o","Dpkg::Options::=--force-confold"]+(["-s"] if dry else [])+["--"]+pk
+        return run(c)
+    if mgr=="npm":
+        return run(["npm","install","-g","--ignore-scripts","--no-audit","--no-fund"]+(["--dry-run"] if dry else [])+["--"]+pk)
+    # pip: own venv per tool, wheels only (no build scripts run)
+    name=pk[0].lower(); vd=f"{TOOLS}/{name}"
+    if dry:
+        tmp=tempfile.mkdtemp(); vd=tmp+"/v"
+    else:
+        os.makedirs(TOOLS,exist_ok=True)
+    rc,o=run(["python3","-m","venv",vd])
+    if rc: return rc,o
+    rc,o=run([vd+"/bin/pip","install","--no-input","--disable-pip-version-check","--only-binary=:all:"]+(["--dry-run"] if dry else [])+["--"]+pk)
+    if dry:
+        shutil.rmtree(tmp,ignore_errors=True); return rc,o
+    if rc==0:
+        linked=[]
+        for f in sorted(os.listdir(vd+"/bin")):
+            if re.match(r"(python|pip|activate|Activate|easy_install|wheel)",f): continue
+            dst="/usr/local/bin/"+f
+            if not os.path.lexists(dst): os.symlink(f"{vd}/bin/{f}",dst); linked.append(f)
+        o+="\nLinked commands: "+(", ".join(linked) or "none")
+    return rc,o
+def cmd_run(i,code,dry):
+    p,d=load(i); now=time.time()
+    if d["used"]: raise Refuse("this approval was already used")
+    if now>d["expires"]: raise Refuse("request expired; make a new one")
+    if d["tries"]>=MAXTRY: raise Refuse("too many wrong codes; request locked, make a new one")
+    if not re.fullmatch(r"\d{6}",code or "") or not hmac.compare_digest(hashlib.sha256((d["salt"]+code).encode()).hexdigest(),d["h"]):
+        d["tries"]+=1; save(p,d); log(event="bad_code",id=i,tries=d["tries"]); raise Refuse("wrong approval code")
+    if not dry: d["used"]=True; save(p,d)
+    log(event="run" if not dry else "dry_run",id=i,mgr=d["mgr"],pkgs=d["pkgs"])
+    try: rc,o=do_install(d,dry)
+    except Exception as ex: rc,o=1,str(ex)
+    tail="\n".join(o.strip().splitlines()[-12:])
+    log(event="result",id=i,mgr=d["mgr"],pkgs=d["pkgs"],ok=rc==0,dry=dry)
+    if not dry: tg(f"{'✅ Installed' if rc==0 else '❌ Install failed'}: {d['mgr']} {' '.join(d['pkgs'])} (request {i})")
+    return f"{'DRY-RUN ' if dry else ''}{'OK' if rc==0 else 'FAILED'} ({d['mgr']} {' '.join(d['pkgs'])})\n{tail}"
+def cmd_status():
+    out=[]
+    for f in sorted(glob.glob(REQ+"/*.json")):
+        try: d=json.load(open(f))
+        except Exception: continue
+        st="used" if d["used"] else ("expired" if time.time()>d["expires"] else "waiting")
+        out.append(f"{d['id']} {st} {d['mgr']} {' '.join(d['pkgs'])}")
+    return "\n".join(out[-15:]) or "no requests"
+def handle(argv):
+    try:
+        if not argv: raise Refuse("usage: request|run|status")
+        c=argv[0]
+        if c=="request": return cmd_request(argv[1] if len(argv)>1 else "",argv[2:])
+        if c=="run":
+            dry="--dry-run" in argv; a=[x for x in argv[1:] if x!="--dry-run"]
+            if len(a)!=2: raise Refuse("usage: run ID CODE [--dry-run]")
+            return cmd_run(a[0],a[1],dry)
+        if c=="status": return cmd_status()
+        raise Refuse("refused: only package installs (request/run/status) are supported")
+    except Refuse as e: log(event="refused",why=str(e)[:100],argv=[a[:30] for a in argv[:4]]); return "REFUSED: "+str(e)
+def spool():
+    os.makedirs(OUT,exist_ok=True)
+    for f in sorted(glob.glob(IN+"/*.json")):
+        n=os.path.basename(f)[:-5]
+        try:
+            st=os.lstat(f)
+            if not re.fullmatch(r"[0-9a-f]{8,32}",n) or not os.path.isfile(f) or os.path.islink(f) or st.st_size>4096: raise Refuse("bad request file")
+            d=json.load(open(f)); argv=[str(x) for x in d["argv"]][:12]
+            res=handle(argv)
+        except Exception as e: res="REFUSED: "+str(e)[:100]
+        try: os.unlink(f)
+        except Exception: pass
+        o=f"{OUT}/{n}.txt"
+        try: os.unlink(o)
+        except FileNotFoundError: pass
+        fd=os.open(o,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
+        os.write(fd,res.encode()); os.close(fd); os.chmod(o,0o640)
+        try: shutil.chown(o,"root","voicetasks")
+        except Exception: pass
+    for f in glob.glob(OUT+"/*.txt"):
+        if time.time()-os.path.getmtime(f)>3600: os.unlink(f)
+if __name__=="__main__":
+    if os.geteuid()!=0: print("must run as root (sudo)"); sys.exit(2)
+    if sys.argv[1:2]==["spool"]: spool()
+    else:
+        r=handle(sys.argv[1:]); print(r); sys.exit(1 if r.startswith(("REFUSED","FAILED")) else 0)

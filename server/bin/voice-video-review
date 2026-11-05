@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""voice-video-review FILE [-q "question"] [--model flash|pro|lite]
+Shrinks the video/audio (480p), asks Gemini (free tier, key stays in a root-side service) and prints the answer.
+Preset questions: --best (best moments + timestamps), --check (pre-post check: hook, audio, title ideas, problems)."""
+import sys, os, json, socket, subprocess, argparse, shutil, uuid
+MEDIA = "/var/lib/voice-creator/media"
+ap = argparse.ArgumentParser(); ap.add_argument("file"); ap.add_argument("-q"); ap.add_argument("--model", default="flash")
+ap.add_argument("--best", action="store_true"); ap.add_argument("--check", action="store_true"); ap.add_argument("--keep", action="store_true")
+a = ap.parse_args()
+Q = {"best": "This is a video from a YouTube creator. List the 5 best moments (highlights, funny reactions, big wins) as `mm:ss - what happens - why it works`. Then say which one is the best 30-60 second clip for a vertical Short and give its exact start and end times. Be brief.",
+     "check": "Check this video before posting to YouTube. Answer briefly: 1) Does the first 5 seconds hook the viewer? 2) Audio problems (too quiet, clipping, background vs voice balance, silence)? 3) Boring or dead stretches to cut (mm:ss ranges). 4) Any swearing, copyright music or personal info on screen? 5) Three title ideas. 6) Verdict: ready to post or fix first."}
+prompt = a.q or (Q["check"] if a.check else Q["best"])
+if not os.path.isfile(a.file): sys.exit("file not found: " + a.file)
+os.makedirs(MEDIA, exist_ok=True)
+out = f"{MEDIA}/{uuid.uuid4().hex[:10]}.mp4"
+isaudio = a.file.lower().endswith((".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus"))
+if isaudio: out = out[:-4] + ".mp3"; cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", a.file, "-vn", "-ac", "1", "-b:a", "48k", out]
+else: cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", a.file, "-vf", "scale=-2:480,fps=5", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32", "-c:a", "aac", "-b:a", "64k", "-ac", "1", out]
+r = subprocess.run(cmd, capture_output=True, text=True)
+if r.returncode: sys.exit("ffmpeg failed: " + r.stderr[-300:])
+os.chmod(out, 0o664)
+try:
+    s = socket.socket(socket.AF_UNIX); s.connect("/run/voice-gemini/gemini.sock")
+    s.sendall((json.dumps({"file": out, "prompt": prompt, "model": a.model}) + "\n").encode())
+    buf = b""
+    while not buf.endswith(b"\n"):
+        c = s.recv(65536)
+        if not c: break
+        buf += c
+    res = json.loads(buf)
+finally:
+    if not a.keep: os.path.exists(out) and os.unlink(out)
+if not res.get("ok"): sys.exit("ERROR: " + res.get("error", "?"))
+print(res["text"])

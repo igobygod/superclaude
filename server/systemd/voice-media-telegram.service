@@ -1,0 +1,9 @@
+[Unit]
+Description=Copy Telegram photos/voice notes into the media inbox
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/local/bin/voice-media telegram-sync

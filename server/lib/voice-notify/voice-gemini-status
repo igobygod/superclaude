@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""voice-gemini-status: today's text-side Gemini usage (requests, ok/fail, tokens, per model) and which models are cooling down."""
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(10)
+try:
+    s.connect("/run/voice-gemini-chat/chat.sock"); s.sendall(b'{"op":"status"}\n'); b = b""
+    while not b.endswith(b"\n"): b += s.recv(65536)
+except Exception as e:
+    print("gemini text proxy not reachable:", e); sys.exit(1)
+r = json.loads(b)
+if "--json" in sys.argv: print(json.dumps(r)); sys.exit(0)
+d = r["day"]
+print(f"text-side Gemini {d['day']}: {d['n']}/{r['daily_budget']} requests, ok {d['ok']}, failed {d['fail']}, tokens {d['tokens']}")
+for m, v in r["models"].items():
+    print(f"  {m}: ok {v['ok']} fail {v['fail']} avg {v['avg_ms']} ms" + (f", cooling down {v['cooldown_s']} s" if v["cooldown_s"] else ""))

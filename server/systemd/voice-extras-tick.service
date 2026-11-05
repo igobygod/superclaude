@@ -1,0 +1,9 @@
+[Unit]
+Description=voice-extras scheduler tick
+[Service]
+Type=oneshot
+User=claude-helper
+Group=voicetasks
+UMask=0007
+EnvironmentFile=-/etc/voice-caller/agent.env
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-extras/tick.py

@@ -1,0 +1,9 @@
+[Unit]
+Description=Mark stuck voice/helper jobs failed
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-dashboard/sweep.py

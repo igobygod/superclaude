@@ -1,0 +1,20 @@
+[Unit]
+Description=Voice job dashboard (private)
+After=network.target
+OnFailure=voice-alert@%n.service
+[Service]
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks
+RuntimeDirectory=voice-dashboard
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStartPre=+/bin/sh -c "grep '^DASH_TOKEN=' /etc/voice-caller/secrets.env | cut -d= -f2- > /run/voice-dashboard/token; chown claude-helper:claude-helper /run/voice-dashboard/token; chmod 600 /run/voice-dashboard/token"
+EnvironmentFile=-/etc/voice-caller/agent.env
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-dashboard/server.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+[Install]
+WantedBy=multi-user.target

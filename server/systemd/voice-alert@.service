@@ -1,0 +1,6 @@
+[Unit]
+Description=Telegram alert for failed %i
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+ExecStart=/usr/local/lib/voice-safety/voice-alert.sh %i

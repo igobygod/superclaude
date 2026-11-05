@@ -1,0 +1,90 @@
+#!/usr/bin/python3 -I
+"""mac-claude: read-only info about Claude Code on this Mac, for the server's mac-run.
+  mac-claude sessions [N]   recent sessions: id, title/first prompt, folder, last activity
+  mac-claude running        Claude Code processes running now
+  mac-claude info ID        JSON {id, cwd, age_s, title} for one session (exit 1 if unknown)
+Every command ends with a 'SPOKEN: ...' line for the voice agent."""
+import glob, json, os, subprocess, sys, time
+
+PROJ = os.path.expanduser("~/.claude/projects")
+
+def ago(s):
+    s = int(s)
+    if s < 90: return f"{s}s ago"
+    if s < 5400: return f"{s//60} min ago"
+    if s < 172800: return f"{s//3600} h ago"
+    return f"{s//86400} days ago"
+
+def files():
+    fs = [f for f in glob.glob(os.path.join(PROJ, "*", "*.jsonl"))]
+    return sorted(fs, key=os.path.getmtime, reverse=True)
+
+def meta(f):
+    cwd = title = first = None
+    with open(f, errors="replace") as fh:
+        for line in fh:
+            if '"cwd"' not in line and '"custom-title"' not in line and '"type":"user"' not in line:
+                continue
+            try: d = json.loads(line)
+            except Exception: continue
+            if d.get("type") == "custom-title": title = d.get("customTitle") or title
+            cwd = cwd or d.get("cwd")
+            if first is None and d.get("type") == "user" and not d.get("isSidechain"):
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = next((b.get("text") for b in c if isinstance(b, dict) and b.get("type") == "text"), None)
+                if isinstance(c, str) and c.strip() and not c.lstrip().startswith("<"):
+                    first = " ".join(c.split())[:160]
+    sid = os.path.basename(f)[:-6]
+    return {"id": sid, "cwd": cwd, "title": title, "first_prompt": first,
+            "age_s": int(time.time() - os.path.getmtime(f)), "file": f}
+
+def label(m):
+    return m["title"] or (m["first_prompt"] or "untitled")[:60]
+
+def cmd_sessions(n=8):
+    ms = [meta(f) for f in files()[:n]]
+    for i, m in enumerate(ms, 1):
+        print(f"{i}. [{m['id']}] {label(m)}\n   folder: {m['cwd']}\n   last activity: {ago(m['age_s'])}"
+              + (f"\n   first prompt: {m['first_prompt']}" if m['first_prompt'] and m['title'] else ""))
+    top = "; ".join(f"{label(m)[:40]} ({ago(m['age_s'])})" for m in ms[:3])
+    print(f"SPOKEN: Your latest Claude sessions are: {top}." if ms else "SPOKEN: I found no Claude sessions on the Mac.")
+
+def cmd_running():
+    out = subprocess.run(["ps", "-axo", "pid=,etime=,comm="], capture_output=True, text=True).stdout
+    recent = {}
+    for f in files()[:60]:
+        m = meta(f)
+        if m["cwd"] and m["cwd"] not in recent: recent[m["cwd"]] = m
+    rows = []
+    for l in out.splitlines():
+        p = l.split(None, 2)
+        if len(p) < 3 or os.path.basename(p[2].strip()) != "claude": continue
+        pid, et = p[0], p[1]
+        args = subprocess.run(["ps", "-o", "args=", "-p", pid], capture_output=True, text=True).stdout
+        if "--version" in args: continue
+        cwd = subprocess.run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
+        cwd = next((x[1:] for x in cwd.splitlines() if x.startswith("n")), "?")
+        kind = "headless job" if " -p " in f" {args} " or " --print" in args else "interactive session"
+        rows.append((pid, et, kind, cwd, recent.get(cwd)))
+    for pid, et, kind, cwd, m in rows:
+        print(f"pid {pid}  running {et}  {kind}\n   folder: {cwd}" +
+              (f"\n   latest session there: [{m['id']}] {label(m)} ({ago(m['age_s'])})" if m else ""))
+    q = len(glob.glob(os.path.expanduser("~/.mac-run/queue/*")))
+    if q: print(f"{q} mac-run job(s) waiting in the queue")
+    n = len(rows); h = sum(1 for r in rows if r[2] == "headless job")
+    print(f"SPOKEN: {n} Claude {'process is' if n == 1 else 'processes are'} running on the Mac" +
+          (f", {h} of them headless jobs." if n else "."))
+
+def cmd_info(sid):
+    hit = [f for f in glob.glob(os.path.join(PROJ, "*", sid + ".jsonl"))]
+    if not hit:
+        print(json.dumps({"error": "unknown session"})); sys.exit(1)
+    m = meta(hit[0]); m.pop("file"); print(json.dumps(m))
+
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a[:1] == ["sessions"]: cmd_sessions(int(a[1]) if len(a) > 1 and a[1].isdigit() else 8)
+    elif a[:1] == ["running"]: cmd_running()
+    elif a[:1] == ["info"] and len(a) == 2 and all(c.isalnum() or c == "-" for c in a[1]): cmd_info(a[1])
+    else: print(__doc__); sys.exit(2)

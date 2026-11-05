@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""voice-questions: shared list of things that need the owner's answer (approve / decide / check).
+  add --text T --kind approve|decide|check [--ref REF]   -> prints id (same open ref = same id)
+  answer ID --via imessage|telegram|call|self --text T   -> first answer wins; later ones print 'already done'
+  list [--open|--all] [--json]    show ID     close ID --text WHY (owner did it themselves)
+Exit codes: 0 ok, 3 already answered (do NOT run the action again), 4 unknown id, 2 usage.
+REF forms the auto-closer understands: gmail:<thread id> (owner sent mail in that thread), cal:<event uid>."""
+import argparse, json, sys, time
+sys.path.insert(0, "/usr/local/lib/voice-notify")
+import vn_common as v
+
+
+def age(t):
+    m = int((time.time() - t) / 60)
+    return f"{m} min" if m < 120 else f"{m // 60} h"
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="voice-questions")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    a = sub.add_parser("add"); a.add_argument("--text", required=True); a.add_argument("--kind", required=True, choices=["approve", "decide", "check"]); a.add_argument("--ref"); a.add_argument("--action", help="what to do when the owner says yes (shown to the helper)")
+    n = sub.add_parser("answer"); n.add_argument("id"); n.add_argument("--via", required=True, choices=["imessage", "telegram", "call", "self"]); n.add_argument("--text", default="")
+    l = sub.add_parser("list"); l.add_argument("--open", action="store_true"); l.add_argument("--all", action="store_true"); l.add_argument("--json", action="store_true")
+    s = sub.add_parser("show"); s.add_argument("id")
+    cl = sub.add_parser("close"); cl.add_argument("id"); cl.add_argument("--text", default="owner did it themselves")
+    x = ap.parse_args()
+    c = v.db()
+    if x.cmd == "add":
+        qid, new = v.q_add(c, x.text, x.kind, x.ref, {"action": x.action} if x.action else None)
+        print(qid + ("" if new else " (already open)"))
+    elif x.cmd == "answer":
+        st, row = v.q_answer(c, x.id, x.via, x.text)
+        if st == "missing":
+            print("no such question", file=sys.stderr); sys.exit(4)
+        if st == "already":
+            print(f"already done ✓ (answered via {row['answer_via']} {age(row['answered_at'])} ago: {row['answer_text'][:80]})")
+            sys.exit(3)
+        print(f"ok: {row['id']} closed via {x.via}. kind={row['kind']} ref={row['ref'] or '-'} question={row['text']}")
+        v.journal(f"Owner answered via {x.via}: \"{x.text[:200]}\" to: {row['text']}", row["id"])
+    elif x.cmd == "list":
+        rows = v.q_open(c) if not x.all else c.execute("select * from questions order by created desc limit 50").fetchall()
+        if x.json:
+            print(json.dumps([dict(r) for r in rows]))
+        elif not rows:
+            print("no open questions")
+        for r in ([] if x.json else rows):
+            print(f"{r['id']} [{r['status']}] {r['kind']} ({age(r['created'])} ago) ref={r['ref'] or '-'}: {r['text']}")
+    elif x.cmd == "show":
+        r = c.execute("select * from questions where id=?", (x.id,)).fetchone()
+        print(json.dumps(dict(r)) if r else "no such question")
+        sys.exit(0 if r else 4)
+    elif x.cmd == "close":
+        ok = v.q_self_close(c, x.id, x.text)
+        print("closed" if ok else "not open")
+        sys.exit(0 if ok else 3)
+
+
+main()

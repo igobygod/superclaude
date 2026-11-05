@@ -1,0 +1,19 @@
+#!/bin/bash
+# One at a time, so simultaneous SSH channels cannot leave a stray lease behind
+[ -n "${WAKE_LEASE_LOCKED:-}" ] || WAKE_LEASE_LOCKED=1 exec /usr/bin/lockf -k "$HOME/.wake-lease.lock" "$0" "$@"
+# wake-lease [minutes]  - keep this Mac awake for N minutes (default 30), replacing any earlier lease
+MIN="${1:-30}"
+case "$MIN" in ''|*[!0-9]*) echo "usage: wake-lease [minutes]"; exit 1;; esac
+PIDF="$HOME/.wake-lease.pid"; UNTIL="$HOME/.wake-lease.until"; LOG="$HOME/.wake-lease.log"
+SRC="${WAKE_LEASE_SOURCE:-}"; [ -z "$SRC" ] && [ -n "${SSH_CONNECTION:-}" ] && SRC="ssh:${SSH_CONNECTION%% *}"; SRC="${SRC:-local}"
+if [ -f "$PIDF" ]; then
+  OLD=$(cat "$PIDF" 2>/dev/null)
+  if [ -n "$OLD" ] && ps -p "$OLD" -o comm= 2>/dev/null | grep -q caffeinate; then kill "$OLD" 2>/dev/null; fi
+fi
+nohup /usr/bin/caffeinate -i -s -t $((MIN*60)) </dev/null >/dev/null 2>&1 &
+NEW=$!
+disown 2>/dev/null
+echo "$NEW" > "$PIDF"
+END=$(( $(date +%s) + MIN*60 )); echo "$END" > "$UNTIL"
+echo "$(date '+%Y-%m-%d %H:%M:%S') lease ${MIN}m pid $NEW src $SRC" >> "$LOG"
+echo "Wake lease: ${MIN} min, until $(date -r "$END" '+%H:%M')"

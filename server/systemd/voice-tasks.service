@@ -1,0 +1,23 @@
+[Unit]
+Description=Runs voice-given tasks as headless Claude Code jobs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks
+WorkingDirectory=/home/claude-helper/assistant
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-tasks/task_runner.py
+Restart=always
+RestartSec=15
+MemoryMax=4G
+CPUQuota=150%
+Nice=10
+NoNewPrivileges=yes
+# Add any other private paths on your server that Claude tasks must never read.
+InaccessiblePaths=-/etc/nginx -/var/log/nginx -/etc/voice-caller
+
+[Install]
+WantedBy=multi-user.target

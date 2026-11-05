@@ -1,0 +1,9 @@
+[Unit]
+Description=voice-memory: check for finished calls to review every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target

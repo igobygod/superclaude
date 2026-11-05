@@ -1,0 +1,13 @@
+[Unit]
+Description=voice-memory: merge profile edits and regenerate profile views
+OnFailure=voice-alert@%n.service
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+User=claude-helper
+Group=claude-helper
+SupplementaryGroups=voicetasks
+UMask=0007
+ExecStart=/usr/local/bin/voice-memory sync
+Nice=5

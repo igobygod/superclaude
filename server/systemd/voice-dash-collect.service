@@ -1,0 +1,6 @@
+[Unit]
+Description=Copy recent calls for the dashboard
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/voice-dashboard/collect.py

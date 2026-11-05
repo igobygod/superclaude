@@ -1,0 +1,6 @@
+#!/bin/bash
+# imessage-send RECIPIENT MESSAGE   (recipient = phone like +15555550100 or Apple ID email)
+# Sends an iMessage through the Mac's Messages app. Prints "sent" and exits 0 on success.
+[ $# -eq 2 ] && [ -n "$1" ] && [ -n "$2" ] || { echo "usage: imessage-send RECIPIENT MESSAGE" >&2; exit 2; }
+b() { printf %s "$1" | base64 -w0; }
+exec timeout 180 /usr/local/bin/mac-ssh "~/bin/imessage-send-mac $(b "$1") $(b "$2")"

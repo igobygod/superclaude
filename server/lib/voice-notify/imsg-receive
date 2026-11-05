@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""SSH forced command for the Mac listener's key. stdin: one JSON line {rowid, ts, text, handle, kind?, attachments?} then the raw bytes
+of each attachment in order. Stores it for the daemon (media goes into the shared media inbox)."""
+import json, sys
+sys.path.insert(0, "/usr/local/lib/voice-notify")
+import vn_common as v, media
+inp = sys.stdin.buffer
+try:
+    m = json.loads(inp.readline(40000))
+    atts = m.get("attachments") or []
+    assert m["handle"] in v.OWNER_HANDLES and isinstance(m["rowid"], int)
+    assert str(m["text"]).strip() or atts
+    assert len(atts) <= 10 and sum(int(a.get("size", 0)) for a in atts) <= 150 * 1024 * 1024
+except Exception:
+    print("rejected"); sys.exit(1)
+c = v.db()
+if m.get("kind") == "agent":  # a text sent TO the owner (by any session/helper): remember it as context, do not answer it
+    v.chat_add(c, "claude", str(m["text"])[:1500]); print("ok"); sys.exit(0)
+lines = [str(m["text"]).strip()] if str(m["text"]).strip() else []
+for a in atts:
+    size = int(a.get("size", 0))
+    data = inp.read(size) if size else b""
+    if a.get("big"):
+        lines.append(f"[MEDIA:{a['type']}] (too big to copy, stays on the Mac at {a['mac_path']}) {a['name']}")
+        continue
+    e = media.save(data, a["name"], "imessage", str(m["text"])[:200], a.get("mime", ""), {"mac_path": a.get("mac_path")})
+    lines.append(f"[MEDIA:{e['type']}] {e['path']}")
+c.execute("insert or ignore into inbound(rowid_src,ts,text) values(?,?,?)", (m["rowid"], float(m.get("ts") or v.now()), "\n".join(lines)[:4000]))
+print("ok")

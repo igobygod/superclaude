@@ -1,0 +1,26 @@
+[Unit]
+Description=Voice caller agent (Gemini Live over LiveKit SIP)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+User=voicecaller
+WorkingDirectory=/srv/voice-caller
+EnvironmentFile=/etc/voice-caller/livekit.env
+EnvironmentFile=/etc/voice-caller/secrets.env
+ExecStartPre=/srv/voice-caller/venv/bin/python call.py --setup-trunk
+ExecStart=/srv/voice-caller/venv/bin/python agent.py start
+Restart=always
+RestartSec=10
+MemoryMax=1500M
+CPUQuota=150%
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/voicecaller /var/lib/voice-tasks
+SupplementaryGroups=voicetasks
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

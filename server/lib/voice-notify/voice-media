@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""voice-media: the shared inbox of photos, voice notes, videos and files the owner sent (iMessage, Telegram, Ask Claude shortcut).
+  latest [--type image|audio|video|file] [--since 10m] [--limit N] [--json]   newest first: time type source path | caption
+  save --source telegram|imessage|shortcut --path FILE [--caption TEXT] [--type T]     copy a received file into the inbox (prints the new path)
+  keep ID    keep forever      prune   delete items older than 7 days (not kept / not named in the journal)"""
+import argparse, json, os, sys, time
+sys.path.insert(0, "/usr/local/lib/voice-notify")
+import media as m
+
+
+def secs(s):
+    return int(s[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[s[-1]] if s and s[-1] in "smhd" else int(s)
+
+
+ap = argparse.ArgumentParser(prog="voice-media")
+sub = ap.add_subparsers(dest="cmd", required=True)
+l = sub.add_parser("latest"); l.add_argument("--type", choices=["image", "audio", "video", "file"]); l.add_argument("--since"); l.add_argument("--limit", type=int, default=5); l.add_argument("--json", action="store_true")
+s = sub.add_parser("save"); s.add_argument("--source", required=True, choices=["telegram", "imessage", "shortcut"]); s.add_argument("--path", required=True); s.add_argument("--caption", default="")
+k = sub.add_parser("keep"); k.add_argument("id")
+sub.add_parser("prune")
+sub.add_parser("telegram-sync", help="ingest photos/voice notes/files the Telegram bot downloaded (run by a timer)")
+x = ap.parse_args()
+if x.cmd == "latest":
+    rows = m.latest(x.type, secs(x.since) if x.since else None, x.limit)
+    if x.json:
+        print(json.dumps(rows))
+    elif not rows:
+        print("nothing")
+    for e in ([] if x.json else rows):
+        print(f"{time.strftime('%H:%M', time.localtime(e['time']))} {e['type']} {e['source']} {e['path']} | {e['caption']}")
+elif x.cmd == "save":
+    p = os.path.realpath(x.path)
+    if not os.path.isfile(p) or os.path.getsize(p) > 100 * 1024 * 1024:
+        print("file missing or over 100 MB", file=sys.stderr); sys.exit(2)
+    e = m.save(open(p, "rb").read(), os.path.basename(p), x.source, x.caption)
+    print(e["path"])
+elif x.cmd == "keep":
+    rows = m.entries(); hit = False
+    for e in rows:
+        if e["id"] == x.id: e["keep"] = True; hit = True
+    open(m.INDEX, "w").write("".join(json.dumps(e) + "\n" for e in rows)); print("kept" if hit else "no such id")
+elif x.cmd == "prune":
+    print("removed", m.prune())
+
+if x.cmd == "telegram-sync":
+    import glob
+    inbox = "/home/claude-helper/.claude/channels/telegram/inbox"
+    stf = os.path.join(os.path.dirname(m.ROOT), "telegram-seen.json")
+    try:
+        seen = set(json.load(open(stf)))
+    except Exception:
+        seen = None
+    names = sorted(os.listdir(inbox)) if os.path.isdir(inbox) else []
+    if seen is None:  # first run: take only the last day, mark the rest as seen
+        seen = {n for n in names if time.time() - os.path.getmtime(os.path.join(inbox, n)) > 86400}
+    new = 0
+    for n in names:
+        p = os.path.join(inbox, n)
+        if n in seen or not os.path.isfile(p) or os.path.getsize(p) == 0 or time.time() - os.path.getmtime(p) < 2:
+            continue
+        seen.add(n)
+        e = m.save(open(p, "rb").read(), n.split("-", 1)[-1] if "-" in n else n, "telegram", "", "", {"telegram_file": n})
+        new += 1
+    json.dump(sorted(seen), open(stf, "w"))
+    print("ingested", new)

@@ -1,0 +1,15 @@
+[Unit]
+Description=Route only the home Mac (MAC_LAN_IP) via Tailscale; keep the server's own overlapping subnet (HOME_SUBNET) local
+After=tailscaled.service
+Wants=tailscaled.service
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+RemainAfterExit=yes
+# /etc/mac-helpers/route.env must define:  MAC_LAN_IP=<Mac's LAN address>   HOME_SUBNET=<subnet that exists both at home and in the server's cloud network, e.g. 10.0.0.0/24>
+# (see config/route.env.example). Table 52 is the one Tailscale uses for subnet routes.
+EnvironmentFile=/etc/mac-helpers/route.env
+ExecStart=/bin/sh -c "ip rule del priority 5200 2>/dev/null; ip rule del priority 5260 2>/dev/null; ip rule add to ${MAC_LAN_IP}/32 lookup 52 priority 5200; ip rule add to ${HOME_SUBNET} lookup main priority 5260"
+ExecStop=/bin/sh -c "ip rule del priority 5200; ip rule del priority 5260"
+[Install]
+WantedBy=multi-user.target

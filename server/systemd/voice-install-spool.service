@@ -1,0 +1,7 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=Process approved-installer requests
+[Service]
+EnvironmentFile=-/etc/voice-caller/agent.env
+Type=oneshot
+ExecStart=/usr/local/sbin/voice-install spool

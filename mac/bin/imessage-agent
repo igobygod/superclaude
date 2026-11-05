@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""imessage-agent: watches the owner's own iMessage chat (Messages chat.db, read-only) and forwards new messages from
+the owner to the server. Runs under launchd inside ImsgAgent.app (which has Full Disk Access).
+  imessage-agent.py            run forever (LaunchAgent)
+  imessage-agent.py --poke     (over SSH) ask the running agent to poll right now; waits up to 25 s
+Only 1:1 chats with the owner's own number / Apple ID are read. Message text is only ever sent to the server as data."""
+import fcntl, hashlib, json, os, re, sqlite3, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+D = f"{HOME}/.imessage-agent"
+DB = f"{HOME}/Library/Messages/chat.db"
+# Owner iMessage handles (phone number and/or Apple ID email), comma-separated. The first one is used as the sender handle.
+OWNER = tuple(h.strip() for h in os.environ.get("OWNER_HANDLES", "+15555550100,owner@example.com").split(",") if h.strip())
+SSH = ["ssh", "-i", os.environ.get("IMSG_SSH_KEY", f"{HOME}/.ssh/superclaude-imsg"), "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=12",
+       "-o", "StrictHostKeyChecking=yes", f'{os.environ.get("SERVER_USER", "claude-helper")}@{os.environ.get("SUPERCLAUDE_SERVER", "203.0.113.10")}', "imsg-receive"]
+os.makedirs(D, exist_ok=True)
+
+
+def log(*a):
+    with open(f"{D}/agent.log", "a") as f:
+        print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, file=f)
+
+
+def norm(t):
+    return re.sub(r"[^a-z0-9]", "", t.lower())[:40]
+
+
+def decode_blob(b):
+    if not b:
+        return ""
+    i = b.find(b"NSString")
+    if i < 0:
+        return ""
+    b = b[i + 8:]
+    j = b.find(b"+")
+    if j < 0 or j > 12:
+        return ""
+    n = b[j + 1]
+    off = j + 2
+    if n == 0x81:
+        n = int.from_bytes(b[off:off + 2], "little"); off += 2
+    return b[off:off + n].decode("utf8", "replace")
+
+
+def ledger():
+    try:
+        return [l.split("\t") for l in open(f"{D}/sent.log").read().splitlines()[-60:]]
+    except Exception:
+        return []
+
+
+def state():
+    try:
+        return json.load(open(f"{D}/state.json"))
+    except Exception:
+        return None
+
+
+def save(s):
+    json.dump(s, open(f"{D}/state.json.tmp", "w")); os.replace(f"{D}/state.json.tmp", f"{D}/state.json")
+
+
+
+MAXSEND = 60 * 1024 * 1024
+TMP = f"{D}/tmp"
+
+
+def prep_attachment(att_id, mime, tname, filename, total):
+    """Returns (meta, bytes|None) for one attachment, converted to something the server/Gemini can use; None if not ready."""
+    path = os.path.expanduser(filename or "")
+    if not path or not os.path.exists(path):
+        return None, None
+    name = tname or os.path.basename(path)
+    if name.endswith("pluginPayloadAttachment"):
+        return {"skip": True}, None
+    ext = os.path.splitext(name)[1].lower()
+    mime = mime or ""
+    os.makedirs(TMP, exist_ok=True)
+    out = None
+    kind = "file"
+    if mime.startswith("image/") or ext in (".heic", ".heif", ".jpg", ".jpeg", ".png", ".gif", ".webp"):
+        kind = "image"
+        out = f"{TMP}/{att_id}.jpg"
+        r = subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", "-Z", "2000", path, "--out", out], capture_output=True, timeout=60)
+        if r.returncode != 0 or not os.path.exists(out):
+            out = path
+        name = os.path.splitext(name)[0] + ".jpg" if out != path else name
+        mime = "image/jpeg" if out != path else mime
+    elif mime.startswith("audio/") or ext in (".caf", ".m4a", ".mp3", ".amr", ".wav", ".aac", ".opus"):
+        kind = "audio"
+        out = f"{TMP}/{att_id}.mp3"
+        r = subprocess.run(["/opt/homebrew/bin/ffmpeg", "-y", "-loglevel", "error", "-i", path, "-ac", "1", "-ar", "16000", "-b:a", "48k", out], capture_output=True, timeout=120)
+        if r.returncode != 0 or not os.path.exists(out):
+            out = path
+        else:
+            name = os.path.splitext(name)[0] + ".mp3"; mime = "audio/mpeg"
+    elif mime.startswith("video/") or ext in (".mov", ".mp4", ".m4v"):
+        kind = "video"; out = path
+    else:
+        out = path
+    size = os.path.getsize(out)
+    meta = {"name": name, "mime": mime or "application/octet-stream", "type": kind, "size": size, "mac_path": path}
+    if size > MAXSEND:
+        meta["big"] = True; meta["size"] = 0
+        return meta, b""
+    data = open(out, "rb").read()
+    if out.startswith(TMP):
+        os.remove(out)
+    return meta, data
+
+
+def poll(replay=None):
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    s = state()
+    if s is None:
+        s = {"last": con.execute("select max(ROWID) from message").fetchone()[0] or 0}
+        save(s); log("first run, starting after rowid", s["last"])
+    marks = ",".join("?" * len(OWNER))
+    if replay:
+        rows = con.execute("select m.ROWID, m.date, m.is_from_me, m.text, m.attributedBody from message m where m.ROWID=?", (replay,)).fetchall()
+    else:
+        rows = con.execute(
+            f"select m.ROWID, m.date, m.is_from_me, m.text, m.attributedBody from message m join chat_message_join j on j.message_id=m.ROWID "
+            f"join chat c on c.ROWID=j.chat_id where m.ROWID>? and c.style=45 and c.chat_identifier in ({marks}) "
+            f"and coalesce(m.associated_message_type,0)=0 order by m.ROWID", (s["last"], *OWNER)).fetchall()
+    led = [[float(t), h, int(n)] for t, h, n in ([x[0], x[1], x[2] if len(x) > 2 else "2"] for x in ledger() if len(x) >= 2)]
+    sent_any = False
+    for rowid, date, from_me, text, blob in rows:
+        text = (text or decode_blob(blob) or "").replace("￼", "").strip()
+        ts = date / 1e9 + 978307200 if date > 1e12 else date + 978307200
+        matched = False
+        for e in led:  # our own server-sent texts appear twice (sent row + echo)
+            if e[1] == norm(text) and e[2] > 0 and abs(ts - e[0]) < 180:
+                e[2] -= 1; matched = True; break
+        atts = con.execute("select a.ROWID, a.mime_type, a.transfer_name, a.filename, a.total_bytes from message_attachment_join j "
+                           "join attachment a on a.ROWID=j.attachment_id where j.message_id=? order by a.ROWID", (rowid,)).fetchall() if not matched else []
+        blobs, metas, notready = [], [], False
+        for a in atts:
+            try:
+                meta, data = prep_attachment(*a)
+            except Exception as e:
+                log("attachment error", rowid, repr(e)[:120]); continue
+            if meta is None:
+                notready = True; break
+            if meta.get("skip"):
+                continue
+            metas.append(meta); blobs.append(data)
+        if notready:  # still downloading from iCloud: retry on the next polls, give up after ~2 min
+            tries = s.setdefault("tries", {}); tries[str(rowid)] = tries.get(str(rowid), 0) + 1
+            if tries[str(rowid)] < 40:
+                save(s); break
+            metas, blobs = [], []
+        if text and matched and from_me:
+            msg = json.dumps({"rowid": rowid, "ts": ts, "text": text, "handle": OWNER[0], "kind": "agent"})  # context only
+        elif (text or metas) and not matched:
+            h = norm(text) or ("att" + str(rowid))
+            fwd = [f for f in s.get("fwd", []) if ts - f[0] < 60]
+            if any(f[1] == h and abs(ts - f[0]) < 3 for f in fwd):  # Apple delivers a self-sent text as two rows
+                msg = None
+            else:
+                fwd.append([ts, h]); s["fwd"] = fwd[-20:]
+                msg = json.dumps({"rowid": rowid, "ts": ts, "text": text, "handle": OWNER[0], **({"attachments": metas} if metas else {})})
+        else:
+            msg = None
+        if msg:
+            payload = msg.encode() + b"\n" + b"".join(blobs)
+            r = subprocess.run(SSH, input=payload, capture_output=True, timeout=40 + len(payload) // 200000)
+            if r.returncode != 0 or b"ok" not in r.stdout:
+                log("forward failed", rowid, r.returncode, r.stderr.decode(errors="replace").strip()[:120]); break  # retry next poll
+            if '"kind": "agent"' not in msg:
+                log("forwarded", rowid, "len", len(text), "attachments", len(metas)); sent_any = True
+        if not replay:
+            s["last"] = rowid; save(s)
+    if sent_any:
+        subprocess.Popen([f"{HOME}/bin/wake-lease", "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if led:
+        open(f"{D}/sent.log", "w").write("".join(f"{t}\t{h}\t{n}\n" for t, h, n in led if time.time() - t < 600))
+    con.close()
+
+
+def whoami():
+    """Which Messages accounts are in use (own addresses only) and which owner handles the 1:1 threads use."""
+    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+    since = (time.time() - 1800 - 978307200) * 1e9
+    rows = con.execute("select c.account_login, c.chat_identifier, c.style, max(m.date) from chat c join chat_message_join j on j.chat_id=c.ROWID "
+                       "join message m on m.ROWID=j.message_id where m.date>? group by c.ROWID", (since,)).fetchall()
+    print("accounts used in the last 30 min:", sorted({r[0] for r in rows}))
+    print("owner threads:", [(r[0], r[1]) for r in rows if r[1] in OWNER])
+    print("last rowid forwarded:", (state() or {}).get("last"))
+
+
+BEAT_URL = None
+
+
+def beat_loop():
+    """Every ~30 s tell the server this Mac is awake (stops by itself when the Mac sleeps)."""
+    import urllib.request
+    while True:
+        try:
+            tok = open(f"{D}/beat-token").read().strip()
+            urllib.request.urlopen(urllib.request.Request(f'https://{os.environ.get("PUBLIC_HOST", "voice.example.com")}/beat/{tok}', b"1", method="POST"), timeout=8).read()
+        except Exception as e:
+            log("beat failed", repr(e)[:80]) if time.time() % 600 < 30 else None
+        time.sleep(30)
+
+
+def main():
+    if "--whoami" in sys.argv:
+        whoami(); return
+    if "--replay" in sys.argv:  # test: forward one past message (with its attachments) through the normal path
+        poll(int(sys.argv[sys.argv.index("--replay") + 1])); return
+    if "--poke" in sys.argv:
+        p = f"{D}/poke"; open(p, "w").write(str(time.time()))
+        for _ in range(50):
+            time.sleep(0.5)
+            if not os.path.exists(p):
+                print("polled"); return
+        print("agent not running?"); sys.exit(1)
+    lock = open(f"{D}/lock", "w")
+    for attempt in range(12):  # a restart (launchctl kickstart) leaves the old python holding the lock: replace it
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if attempt == 0:
+                try:
+                    old = int(open(f"{D}/pid").read())
+                    if old != os.getpid():
+                        os.kill(old, 15)
+                except Exception:
+                    pass
+            time.sleep(0.5)
+    else:
+        sys.exit(0)
+    open(f"{D}/pid", "w").write(str(os.getpid()))
+    log("agent up")
+    import threading
+    threading.Thread(target=beat_loop, daemon=True).start()
+    last = 0
+    while True:
+        poked = os.path.exists(f"{D}/poke")
+        if poked or time.time() - last >= 3:
+            last = time.time()
+            try:
+                poll()
+            except Exception as e:
+                log("poll error", repr(e)[:200])
+            if poked:
+                try: os.remove(f"{D}/poke")
+                except OSError: pass
+        time.sleep(0.5)
+
+
+main()
