@@ -1,6 +1,6 @@
-# SuperClaude
+# SuperClaude: a "dots" alternative for Claude, but better
 
-**An always-on personal AI assistant you host yourself. Text it on iMessage, and it phones you when something matters.**
+**A self-hosted alternative to OpenAI's dots, built on Claude. It's always on: text it on iMessage, and it phones you when something matters.**
 
 SuperClaude is a "Jarvis"-style assistant built with Claude Code on free infrastructure. It has a fast voice that answers real phone calls, a text brain that replies on iMessage in seconds, and headless Claude Code doing the actual work in the background. It remembers you, reviews its own conversations so it improves, and can control your Mac.
 
