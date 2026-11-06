@@ -63,7 +63,7 @@ OpenAI's [dots](https://learn.chatgpt.com/docs/dots) is an always-on cloud agent
 | Your computer | Connect one personal computer | Your Mac, woken from sleep over Tailscale |
 | Your data | Stored by OpenAI | On your own server, in plain files you can read |
 | Change how it works | Settings and rules | Change anything: it's your code |
-| Cost | ChatGPT plan | Free infrastructure (Oracle free tier, Gemini free tier, Linphone, Tailscale) plus your existing Claude Pro/Max plan |
+| Cost | ChatGPT plan | Free infrastructure (Oracle free tier, Gemini free tier, Linphone, Tailscale) plus your existing Claude Pro/Max plan. Optional [paid upgrades](docs/paid-upgrades.md) are available. |
 
 dots is easier: there's nothing to install. SuperClaude is for people who want an assistant that **calls them**, keeps their data on their own machines, and can be taken apart and changed.
 
@@ -143,6 +143,8 @@ Follow [docs/setup/](docs/setup/00-overview.md) in order:
 | 10 | [Telegram bot, nginx and HTTPS](docs/setup/10-telegram-nginx-https.md) |
 | 11 | [systemd services and timers](docs/setup/11-systemd-services.md) |
 | 12 | [Running it all on an always-on Mac instead](docs/setup/12-always-on-mac-host.md) |
+
+**Have a budget?** [docs/paid-upgrades.md](docs/paid-upgrades.md) lists paid swaps for a smoother experience: a Claude Max plan, the Gemini paid tier, a real phone number, LiveKit Cloud, a hosted iMessage API, and a dedicated Mac mini. Each one says whether it works today or still needs code changes.
 
 Settings go in one file: copy [config/superclaude.env.example](config/superclaude.env.example) and fill it in. **Never commit the filled-in copy.**
 
